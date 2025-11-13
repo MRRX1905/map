@@ -1,0 +1,1037 @@
+-- AdminPanel.client.lua local script
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+
+-- ==== Config ====
+local CONFIG = {
+	COLORS = {
+		Primary = Color3.fromRGB(99, 102, 241),
+		Secondary = Color3.fromRGB(139, 92, 246),
+		Success = Color3.fromRGB(34, 197, 94),
+		Warning = Color3.fromRGB(251, 146, 60),
+		Danger = Color3.fromRGB(239, 68, 68),
+		Dark = Color3.fromRGB(17, 24, 39),
+		Gray = Color3.fromRGB(55, 65, 81),
+		Light = Color3.fromRGB(243, 244, 246),
+	},
+	ANIMATION_SPEED = 0.3,
+}
+
+-- ==== Utilities ====
+local function waitForRemotes(timeout)
+	timeout = timeout or 10
+	local t0 = os.clock()
+	local rem = ReplicatedStorage:FindFirstChild("Remotes")
+	while not rem and os.clock() - t0 < timeout do
+		task.wait(0.1)
+		rem = ReplicatedStorage:FindFirstChild("Remotes")
+	end
+	return rem
+end
+
+local Remotes = waitForRemotes(10)
+if not Remotes then
+	warn("[AdminPanel] Remotes folder tidak ditemukan")
+	return
+end
+
+-- Get all remotes
+local IsAdminRF = Remotes:FindFirstChild("IsAdmin")
+local GetPlayerListRF = Remotes:FindFirstChild("GetPlayerList")
+local AdminSetStatRE = Remotes:FindFirstChild("AdminSetStat")
+local GetEventStatusRF = Remotes:FindFirstChild("GetEventStatus")
+local AdminSetEventRE = Remotes:FindFirstChild("AdminSetEvent")
+local EventChangedRE = Remotes:FindFirstChild("EventChanged")
+local AdminAnnounceRE = Remotes:FindFirstChild("AdminAnnounce")
+
+if not IsAdminRF or not GetEventStatusRF or not AdminSetEventRE then
+	warn("[AdminPanel] Remote wajib belum siap")
+	return
+end
+
+-- Check admin
+local isAdmin = false
+pcall(function() isAdmin = IsAdminRF:InvokeServer() end)
+if not isAdmin then return end
+
+-- ==== UI Helper Functions ====
+local function tween(obj, props, duration)
+	duration = duration or CONFIG.ANIMATION_SPEED
+	local info = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	TweenService:Create(obj, info, props):Play()
+end
+
+local function makeCorner(obj, radius)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius or 12)
+	corner.Parent = obj
+	return corner
+end
+
+local function makePadding(obj, all)
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, all)
+	padding.PaddingBottom = UDim.new(0, all)
+	padding.PaddingLeft = UDim.new(0, all)
+	padding.PaddingRight = UDim.new(0, all)
+	padding.Parent = obj
+	return padding
+end
+
+local function makeGradient(obj, color1, color2)
+	local gradient = Instance.new("UIGradient")
+	gradient.Color = ColorSequence.new(color1, color2)
+	gradient.Rotation = 90
+	gradient.Parent = obj
+	return gradient
+end
+
+local function cleanNum(n)
+	n = tonumber(n) or 0
+	if n == math.floor(n) then return tostring(n) end
+	local s = string.format("%.2f", n)
+	return s:gsub("0+$",""):gsub("%.$","")
+end
+
+local function formatTime(sec)
+	if sec < 0 then sec = 0 end
+	local h = math.floor(sec/3600); sec = sec % 3600
+	local m = math.floor(sec/60); sec = sec % 60
+	return string.format("%02d:%02d:%02d", h, m, sec)
+end
+
+local function parseDuration(str)
+	str = string.lower(str or "")
+	local total = 0
+	for num in string.gmatch(str,"(%d+)%s*h") do total = total + tonumber(num)*3600 end
+	for num in string.gmatch(str,"(%d+)%s*m") do total = total + tonumber(num)*60 end
+	for num in string.gmatch(str,"(%d+)%s*s") do total = total + tonumber(num) end
+	if total == 0 then total = tonumber(str) or 0 end
+	return total
+end
+
+-- Notification system
+local function showNotification(title, message, color)
+	local notif = Instance.new("Frame")
+	notif.Size = UDim2.new(0, 300, 0, 80)
+	notif.Position = UDim2.new(1, -320, 0, 20)
+	notif.BackgroundColor3 = color or CONFIG.COLORS.Primary
+	notif.BackgroundTransparency = 0.1
+	notif.Parent = LocalPlayer.PlayerGui:FindFirstChild("AdminPanelUI")
+	makeCorner(notif, 10)
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Size = UDim2.new(1, -20, 0, 25)
+	titleLabel.Position = UDim2.new(0, 10, 0, 10)
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Text = title
+	titleLabel.Font = Enum.Font.GothamBold
+	titleLabel.TextSize = 14
+	titleLabel.TextColor3 = Color3.new(1, 1, 1)
+	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	titleLabel.Parent = notif
+
+	local msgLabel = Instance.new("TextLabel")
+	msgLabel.Size = UDim2.new(1, -20, 0, 35)
+	msgLabel.Position = UDim2.new(0, 10, 0, 35)
+	msgLabel.BackgroundTransparency = 1
+	msgLabel.Text = message
+	msgLabel.Font = Enum.Font.Gotham
+	msgLabel.TextSize = 12
+	msgLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	msgLabel.TextXAlignment = Enum.TextXAlignment.Left
+	msgLabel.TextWrapped = true
+	msgLabel.Parent = notif
+
+	tween(notif, {Position = UDim2.new(1, -320, 0, 20)}, 0.3)
+
+	task.delay(3, function()
+		tween(notif, {Position = UDim2.new(1, 20, 0, 20)}, 0.3)
+		task.wait(0.3)
+		notif:Destroy()
+	end)
+end
+
+-- ==== Main GUI ====
+local gui = Instance.new("ScreenGui")
+gui.Name = "AdminPanelUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Toggle button with icon
+local toggleButton = Instance.new("TextButton")
+toggleButton.Size = UDim2.new(0, 60, 0, 60)
+toggleButton.Position = UDim2.new(1, -80, 1, -80)
+toggleButton.BackgroundColor3 = CONFIG.COLORS.Primary
+toggleButton.BackgroundTransparency = 0.1
+toggleButton.Text = "⚙️"
+toggleButton.TextSize = 24
+toggleButton.Font = Enum.Font.GothamBold
+toggleButton.TextColor3 = Color3.new(1, 1, 1)
+toggleButton.Parent = gui
+makeCorner(toggleButton, 30)
+makeGradient(toggleButton, CONFIG.COLORS.Primary, CONFIG.COLORS.Secondary)
+
+-- Shadow effect
+local shadow = Instance.new("ImageLabel")
+shadow.Size = UDim2.new(1, 20, 1, 20)
+shadow.Position = UDim2.new(0, -10, 0, -10)
+shadow.BackgroundTransparency = 1
+shadow.Image = "rbxasset://textures/ui/GuiImagePlaceholder.png"
+shadow.ImageTransparency = 0.8
+shadow.ZIndex = -1
+shadow.Parent = toggleButton
+
+-- Main modal
+local modal = Instance.new("Frame")
+modal.Size = UDim2.new(0, 900, 0, 600)
+modal.Position = UDim2.new(0.5, -450, 0.5, -300)
+modal.BackgroundColor3 = CONFIG.COLORS.Dark
+modal.BackgroundTransparency = 0.05
+modal.Visible = false
+modal.Parent = gui
+makeCorner(modal, 16)
+
+-- Header
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 60)
+header.BackgroundColor3 = CONFIG.COLORS.Primary
+header.BackgroundTransparency = 0.1
+header.Parent = modal
+makeCorner(header, 16)
+makeGradient(header, CONFIG.COLORS.Primary, CONFIG.COLORS.Secondary)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(0, 200, 1, 0)
+title.Position = UDim2.new(0, 20, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "🛡️ Admin Panel"
+title.Font = Enum.Font.GothamBold
+title.TextSize = 20
+title.TextColor3 = Color3.new(1, 1, 1)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = header
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 40, 0, 40)
+closeBtn.Position = UDim2.new(1, -50, 0, 10)
+closeBtn.BackgroundColor3 = CONFIG.COLORS.Danger
+closeBtn.BackgroundTransparency = 0.2
+closeBtn.Text = "✕"
+closeBtn.TextSize = 18
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextColor3 = Color3.new(1, 1, 1)
+closeBtn.Parent = header
+makeCorner(closeBtn, 20)
+
+-- Sidebar
+local sidebar = Instance.new("Frame")
+sidebar.Size = UDim2.new(0, 200, 1, -80)
+sidebar.Position = UDim2.new(0, 10, 0, 70)
+sidebar.BackgroundColor3 = CONFIG.COLORS.Gray
+sidebar.BackgroundTransparency = 0.1
+sidebar.Parent = modal
+makeCorner(sidebar, 12)
+
+local sidebarLayout = Instance.new("UIListLayout")
+sidebarLayout.Padding = UDim.new(0, 8)
+sidebarLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+sidebarLayout.Parent = sidebar
+makePadding(sidebar, 10)
+
+-- Tab button creator
+local currentTab = nil
+local tabs = {}
+
+local function createTabButton(name, icon, order)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 0, 45)
+	btn.BackgroundColor3 = CONFIG.COLORS.Gray
+	btn.BackgroundTransparency = 0.3
+	btn.Text = icon .. " " .. name
+	btn.Font = Enum.Font.Gotham
+	btn.TextSize = 14
+	btn.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	btn.TextXAlignment = Enum.TextXAlignment.Left
+	btn.LayoutOrder = order
+	btn.Parent = sidebar
+	makeCorner(btn, 8)
+	makePadding(btn, 10)
+
+	return btn
+end
+
+-- Content area
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -230, 1, -80)
+content.Position = UDim2.new(0, 220, 0, 70)
+content.BackgroundColor3 = CONFIG.COLORS.Gray
+content.BackgroundTransparency = 0.1
+content.Parent = modal
+makeCorner(content, 12)
+
+-- Panel creator
+local function createPanel()
+	local panel = Instance.new("ScrollingFrame")
+	panel.Size = UDim2.new(1, 0, 1, 0)
+	panel.BackgroundTransparency = 1
+	panel.BorderSizePixel = 0
+	panel.ScrollBarThickness = 6
+	panel.ScrollBarImageColor3 = CONFIG.COLORS.Primary
+	panel.Visible = false
+	panel.Parent = content
+	makePadding(panel, 15)
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 15)
+	layout.Parent = panel
+
+	return panel
+end
+
+-- ==== TABS ====
+local playerPanel = createPanel()
+local eventPanel = createPanel()
+local statsPanel = createPanel()
+local logsPanel = createPanel()
+
+tabs.players = {button = createTabButton("Players", "👥", 1), panel = playerPanel}
+tabs.events = {button = createTabButton("Events", "🎉", 2), panel = eventPanel}
+tabs.stats = {button = createTabButton("Statistics", "📊", 3), panel = statsPanel}
+tabs.logs = {button = createTabButton("Logs", "📝", 4), panel = logsPanel}
+
+local function selectTab(tabName)
+	for name, tab in pairs(tabs) do
+		if name == tabName then
+			tab.panel.Visible = true
+			tab.button.BackgroundColor3 = CONFIG.COLORS.Primary
+			tab.button.BackgroundTransparency = 0.2
+			tab.button.Font = Enum.Font.GothamBold
+			currentTab = tabName
+		else
+			tab.panel.Visible = false
+			tab.button.BackgroundColor3 = CONFIG.COLORS.Gray
+			tab.button.BackgroundTransparency = 0.3
+			tab.button.Font = Enum.Font.Gotham
+		end
+	end
+end
+
+-- Connect tab buttons
+for name, tab in pairs(tabs) do
+	tab.button.MouseButton1Click:Connect(function()
+		selectTab(name)
+	end)
+end
+
+-- ==== PLAYER PANEL ====
+local searchBox = Instance.new("TextBox")
+searchBox.Size = UDim2.new(1, 0, 0, 40)
+searchBox.BackgroundColor3 = CONFIG.COLORS.Dark
+searchBox.BackgroundTransparency = 0.2
+searchBox.PlaceholderText = "🔍 Search player..."
+searchBox.Text = ""
+searchBox.Font = Enum.Font.Gotham
+searchBox.TextSize = 14
+searchBox.TextColor3 = Color3.new(1, 1, 1)
+searchBox.TextXAlignment = Enum.TextXAlignment.Left
+searchBox.Parent = playerPanel
+makeCorner(searchBox, 8)
+makePadding(searchBox, 10)
+
+local playerList = Instance.new("Frame")
+playerList.Size = UDim2.new(1, 0, 0, 300)
+playerList.BackgroundColor3 = CONFIG.COLORS.Dark
+playerList.BackgroundTransparency = 0.2
+playerList.Parent = playerPanel
+makeCorner(playerList, 8)
+
+local playerScroll = Instance.new("ScrollingFrame")
+playerScroll.Size = UDim2.new(1, -10, 1, -10)
+playerScroll.Position = UDim2.new(0, 5, 0, 5)
+playerScroll.BackgroundTransparency = 1
+playerScroll.ScrollBarThickness = 4
+playerScroll.ScrollBarImageColor3 = CONFIG.COLORS.Primary
+playerScroll.Parent = playerList
+
+local playerLayout = Instance.new("UIListLayout")
+playerLayout.Padding = UDim.new(0, 8)
+playerLayout.Parent = playerScroll
+
+local selectedPlayer = nil
+
+local function createPlayerCard(playerData)
+	-- Validate player data
+	if not playerData then return nil end
+
+	local userId = playerData.UserId or playerData.userId or playerData.Id
+	local playerName = playerData.name or playerData.Name or "Unknown"
+
+	if not userId then return nil end
+
+	local card = Instance.new("TextButton")
+	card.Size = UDim2.new(1, -10, 0, 60)
+	card.BackgroundColor3 = CONFIG.COLORS.Gray
+	card.BackgroundTransparency = 0.3
+	card.AutoButtonColor = false
+	card.Text = ""
+	card.Parent = playerScroll
+	makeCorner(card, 8)
+
+	local avatar = Instance.new("ImageLabel")
+	avatar.Size = UDim2.new(0, 40, 0, 40)
+	avatar.Position = UDim2.new(0, 10, 0.5, -20)
+	avatar.BackgroundTransparency = 1
+	avatar.Image = "rbxthumb://type=AvatarHeadShot&id="..tostring(userId).."&w=150&h=150"
+	avatar.Parent = card
+	makeCorner(avatar, 20)
+
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Size = UDim2.new(1, -70, 0, 20)
+	nameLabel.Position = UDim2.new(0, 60, 0, 10)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = playerName
+	nameLabel.Font = Enum.Font.GothamBold
+	nameLabel.TextSize = 14
+	nameLabel.TextColor3 = Color3.new(1, 1, 1)
+	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+	nameLabel.Parent = card
+
+	local idLabel = Instance.new("TextLabel")
+	idLabel.Size = UDim2.new(1, -70, 0, 16)
+	idLabel.Position = UDim2.new(0, 60, 0, 32)
+	idLabel.BackgroundTransparency = 1
+	idLabel.Text = "ID: " .. tostring(userId)
+	idLabel.Font = Enum.Font.Gotham
+	idLabel.TextSize = 12
+	idLabel.TextColor3 = Color3.new(0.7, 0.7, 0.7)
+	idLabel.TextXAlignment = Enum.TextXAlignment.Left
+	idLabel.Parent = card
+
+	card.MouseButton1Click:Connect(function()
+		selectedPlayer = userId
+		showNotification("Player Selected", playerName .. " selected", CONFIG.COLORS.Success)
+
+		-- Highlight selected
+		for _, child in ipairs(playerScroll:GetChildren()) do
+			if child:IsA("TextButton") then
+				child.BackgroundTransparency = 0.3
+			end
+		end
+		card.BackgroundTransparency = 0.1
+	end)
+
+	-- Update canvas size after adding card
+	task.defer(function()
+		playerScroll.CanvasSize = UDim2.new(0, 0, 0, playerLayout.AbsoluteContentSize.Y + 10)
+	end)
+
+	return card
+end
+
+local function refreshPlayerList(filter)
+	-- Clear only player cards, not the layout
+	for _, child in ipairs(playerScroll:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+
+	local res
+	local ok = pcall(function() res = GetPlayerListRF:InvokeServer() end)
+	if not ok or not res or not res.ok or not res.players then 
+		warn("[AdminPanel] Failed to get player list")
+		return 
+	end
+
+	filter = string.lower(filter or "")
+	local cardCount = 0
+
+	for _, pl in ipairs(res.players) do
+		if pl then
+			local playerName = pl.name or pl.Name or ""
+			if filter == "" or string.find(string.lower(playerName), filter) then
+				local card = createPlayerCard(pl)
+				if card then
+					cardCount = cardCount + 1
+				end
+			end
+		end
+	end
+
+	-- Show message if no players found
+	if cardCount == 0 then
+		local noPlayers = Instance.new("TextLabel")
+		noPlayers.Size = UDim2.new(1, -10, 0, 40)
+		noPlayers.BackgroundTransparency = 1
+		noPlayers.Text = "No players found"
+		noPlayers.Font = Enum.Font.Gotham
+		noPlayers.TextSize = 13
+		noPlayers.TextColor3 = Color3.new(0.6, 0.6, 0.6)
+		noPlayers.Parent = playerScroll
+	end
+
+	-- Update canvas size
+	task.defer(function()
+		playerScroll.CanvasSize = UDim2.new(0, 0, 0, playerLayout.AbsoluteContentSize.Y + 10)
+	end)
+end
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+	refreshPlayerList(searchBox.Text)
+end)
+
+-- Stats control
+local statsFrame = Instance.new("Frame")
+statsFrame.Size = UDim2.new(1, 0, 0, 200)
+statsFrame.BackgroundColor3 = CONFIG.COLORS.Dark
+statsFrame.BackgroundTransparency = 0.2
+statsFrame.Parent = playerPanel
+makeCorner(statsFrame, 8)
+makePadding(statsFrame, 15)
+
+local statsLayout = Instance.new("UIListLayout")
+statsLayout.Padding = UDim.new(0, 10)
+statsLayout.Parent = statsFrame
+
+local function createStatControl(statName, placeholder)
+	local container = Instance.new("Frame")
+	container.Size = UDim2.new(1, 0, 0, 40)
+	container.BackgroundTransparency = 1
+	container.Parent = statsFrame
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(0, 100, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Text = statName .. ":"
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 13
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = container
+
+	local input = Instance.new("TextBox")
+	input.Size = UDim2.new(1, -230, 1, 0)
+	input.Position = UDim2.new(0, 110, 0, 0)
+	input.BackgroundColor3 = CONFIG.COLORS.Gray
+	input.BackgroundTransparency = 0.3
+	input.PlaceholderText = placeholder
+	input.Text = ""
+	input.Font = Enum.Font.Gotham
+	input.TextSize = 13
+	input.TextColor3 = Color3.new(1, 1, 1)
+	input.Parent = container
+	makeCorner(input, 6)
+	makePadding(input, 8)
+
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0, 100, 1, 0)
+	btn.Position = UDim2.new(1, -100, 0, 0)
+	btn.BackgroundColor3 = CONFIG.COLORS.Primary
+	btn.BackgroundTransparency = 0.2
+	btn.Text = "Set"
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 13
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.Parent = container
+	makeCorner(btn, 6)
+
+	btn.MouseButton1Click:Connect(function()
+		if not selectedPlayer or not AdminSetStatRE then 
+			showNotification("Error", "Please select a player first", CONFIG.COLORS.Danger)
+			return 
+		end
+
+		local value = tonumber(input.Text)
+		if not value then 
+			showNotification("Error", "Invalid value", CONFIG.COLORS.Danger)
+			return 
+		end
+
+		AdminSetStatRE:FireServer({
+			targetUserId = selectedPlayer,
+			stat = statName,
+			value = value
+		})
+
+		showNotification("Success", statName .. " updated to " .. value, CONFIG.COLORS.Success)
+		input.Text = ""
+	end)
+
+	return container
+end
+
+createStatControl("Summit", "e.g., 100 or -50")
+createStatControl("Cash", "e.g., 5000 or -1000")
+
+-- ==== EVENT PANEL ====
+local eventStatus = Instance.new("Frame")
+eventStatus.Size = UDim2.new(1, 0, 0, 120)
+eventStatus.BackgroundColor3 = CONFIG.COLORS.Dark
+eventStatus.BackgroundTransparency = 0.2
+eventStatus.Parent = eventPanel
+makeCorner(eventStatus, 8)
+makePadding(eventStatus, 15)
+
+local statusTitle = Instance.new("TextLabel")
+statusTitle.Size = UDim2.new(1, 0, 0, 25)
+statusTitle.BackgroundTransparency = 1
+statusTitle.Text = "📊 Current Event Status"
+statusTitle.Font = Enum.Font.GothamBold
+statusTitle.TextSize = 16
+statusTitle.TextColor3 = Color3.new(1, 1, 1)
+statusTitle.TextXAlignment = Enum.TextXAlignment.Left
+statusTitle.Parent = eventStatus
+
+local statusText = Instance.new("TextLabel")
+statusText.Size = UDim2.new(1, 0, 1, -30)
+statusText.Position = UDim2.new(0, 0, 0, 30)
+statusText.BackgroundTransparency = 1
+statusText.Text = "No active event"
+statusText.Font = Enum.Font.Gotham
+statusText.TextSize = 14
+statusText.TextColor3 = Color3.new(0.8, 0.8, 0.8)
+statusText.TextXAlignment = Enum.TextXAlignment.Left
+statusText.TextYAlignment = Enum.TextYAlignment.Top
+statusText.TextWrapped = true
+statusText.Parent = eventStatus
+
+local function updateEventStatus()
+	local s
+	local ok = pcall(function() s = GetEventStatusRF:InvokeServer() end)
+	if ok and typeof(s) == "table" and s.active then
+		local remain = math.max(0, (s["end"] or 0) - (s.now or 0))
+		local scopeLabel = (s.scope == "global") and "🌍 GLOBAL EVENT" or "🖥️ SERVER EVENT"
+		statusText.Text = string.format(
+			"%s\n✨ Summit Multiplier: x%s\n💰 Cash Multiplier: x%s\n⏱️ Time Remaining: %s",
+			scopeLabel, cleanNum(s.summitMult), cleanNum(s.cashMult), formatTime(remain)
+		)
+		statusText.TextColor3 = CONFIG.COLORS.Success
+	else
+		statusText.Text = "ℹ️ No active event"
+		statusText.TextColor3 = Color3.new(0.6, 0.6, 0.6)
+	end
+end
+
+-- Event controls
+local eventControls = Instance.new("Frame")
+eventControls.Size = UDim2.new(1, 0, 0, 280)
+eventControls.BackgroundColor3 = CONFIG.COLORS.Dark
+eventControls.BackgroundTransparency = 0.2
+eventControls.Parent = eventPanel
+makeCorner(eventControls, 8)
+makePadding(eventControls, 15)
+
+local controlLayout = Instance.new("UIListLayout")
+controlLayout.Padding = UDim.new(0, 12)
+controlLayout.Parent = eventControls
+
+local controlTitle = Instance.new("TextLabel")
+controlTitle.Size = UDim2.new(1, 0, 0, 25)
+controlTitle.BackgroundTransparency = 1
+controlTitle.Text = "⚙️ Event Configuration"
+controlTitle.Font = Enum.Font.GothamBold
+controlTitle.TextSize = 16
+controlTitle.TextColor3 = Color3.new(1, 1, 1)
+controlTitle.TextXAlignment = Enum.TextXAlignment.Left
+controlTitle.Parent = eventControls
+
+-- Multipliers row
+local multipliersRow = Instance.new("Frame")
+multipliersRow.Size = UDim2.new(1, 0, 0, 40)
+multipliersRow.BackgroundTransparency = 1
+multipliersRow.Parent = eventControls
+
+local summitBox = Instance.new("TextBox")
+summitBox.Size = UDim2.new(0.48, 0, 1, 0)
+summitBox.BackgroundColor3 = CONFIG.COLORS.Gray
+summitBox.BackgroundTransparency = 0.3
+summitBox.PlaceholderText = "Summit x (e.g., 2.5)"
+summitBox.Font = Enum.Font.Gotham
+summitBox.TextSize = 13
+summitBox.TextColor3 = Color3.new(1, 1, 1)
+summitBox.Parent = multipliersRow
+makeCorner(summitBox, 6)
+makePadding(summitBox, 8)
+
+local cashBox = Instance.new("TextBox")
+cashBox.Size = UDim2.new(0.48, 0, 1, 0)
+cashBox.Position = UDim2.new(0.52, 0, 0, 0)
+cashBox.BackgroundColor3 = CONFIG.COLORS.Gray
+cashBox.BackgroundTransparency = 0.3
+cashBox.PlaceholderText = "Cash x (e.g., 1.5)"
+cashBox.Font = Enum.Font.Gotham
+cashBox.TextSize = 13
+cashBox.TextColor3 = Color3.new(1, 1, 1)
+cashBox.Parent = multipliersRow
+makeCorner(cashBox, 6)
+makePadding(cashBox, 8)
+
+-- Duration
+local durationBox = Instance.new("TextBox")
+durationBox.Size = UDim2.new(1, 0, 0, 40)
+durationBox.BackgroundColor3 = CONFIG.COLORS.Gray
+durationBox.BackgroundTransparency = 0.3
+durationBox.PlaceholderText = "Duration (e.g., 30m, 2h, 1h30m, 3600)"
+durationBox.Font = Enum.Font.Gotham
+durationBox.TextSize = 13
+durationBox.TextColor3 = Color3.new(1, 1, 1)
+durationBox.Parent = eventControls
+makeCorner(durationBox, 6)
+makePadding(durationBox, 8)
+
+-- Scope toggle
+local currentScope = "local"
+local scopeBtn = Instance.new("TextButton")
+scopeBtn.Size = UDim2.new(1, 0, 0, 40)
+scopeBtn.BackgroundColor3 = CONFIG.COLORS.Secondary
+scopeBtn.BackgroundTransparency = 0.2
+scopeBtn.Text = "🖥️ Scope: This Server"
+scopeBtn.Font = Enum.Font.GothamBold
+scopeBtn.TextSize = 14
+scopeBtn.TextColor3 = Color3.new(1, 1, 1)
+scopeBtn.Parent = eventControls
+makeCorner(scopeBtn, 6)
+
+scopeBtn.MouseButton1Click:Connect(function()
+	if currentScope == "local" then
+		currentScope = "global"
+		scopeBtn.Text = "🌍 Scope: Global (All Servers)"
+		scopeBtn.BackgroundColor3 = CONFIG.COLORS.Warning
+	else
+		currentScope = "local"
+		scopeBtn.Text = "🖥️ Scope: This Server"
+		scopeBtn.BackgroundColor3 = CONFIG.COLORS.Secondary
+	end
+end)
+
+-- Action buttons
+local actionsRow = Instance.new("Frame")
+actionsRow.Size = UDim2.new(1, 0, 0, 45)
+actionsRow.BackgroundTransparency = 1
+actionsRow.Parent = eventControls
+
+local applyBtn = Instance.new("TextButton")
+applyBtn.Size = UDim2.new(0.48, 0, 1, 0)
+applyBtn.BackgroundColor3 = CONFIG.COLORS.Success
+applyBtn.BackgroundTransparency = 0.2
+applyBtn.Text = "✓ Apply Event"
+applyBtn.Font = Enum.Font.GothamBold
+applyBtn.TextSize = 14
+applyBtn.TextColor3 = Color3.new(1, 1, 1)
+applyBtn.Parent = actionsRow
+makeCorner(applyBtn, 8)
+
+local clearBtn = Instance.new("TextButton")
+clearBtn.Size = UDim2.new(0.48, 0, 1, 0)
+clearBtn.Position = UDim2.new(0.52, 0, 0, 0)
+clearBtn.BackgroundColor3 = CONFIG.COLORS.Danger
+clearBtn.BackgroundTransparency = 0.2
+clearBtn.Text = "✕ Clear Event"
+clearBtn.Font = Enum.Font.GothamBold
+clearBtn.TextSize = 14
+clearBtn.TextColor3 = Color3.new(1, 1, 1)
+clearBtn.Parent = actionsRow
+makeCorner(clearBtn, 8)
+
+applyBtn.MouseButton1Click:Connect(function()
+	if not AdminSetEventRE then return end
+
+	local sm = tonumber(summitBox.Text) or 1
+	local cm = tonumber(cashBox.Text) or 1
+	local dur = parseDuration(durationBox.Text)
+
+	if dur <= 0 then
+		showNotification("Error", "Invalid duration", CONFIG.COLORS.Danger)
+		return
+	end
+
+	local start = os.time()
+	local stop = start + dur
+
+	AdminSetEventRE:FireServer({
+		summitMult = sm,
+		cashMult = cm,
+		startTS = start,
+		endTS = stop,
+		scope = currentScope,
+	})
+
+	showNotification("Event Started", 
+		string.format("Summit x%s, Cash x%s for %s", cleanNum(sm), cleanNum(cm), formatTime(dur)),
+		CONFIG.COLORS.Success)
+
+	task.wait(0.5)
+	updateEventStatus()
+end)
+
+clearBtn.MouseButton1Click:Connect(function()
+	if not AdminSetEventRE then return end
+
+	AdminSetEventRE:FireServer({
+		summitMult = 1,
+		cashMult = 1,
+		startTS = 0,
+		endTS = 0,
+		scope = currentScope,
+	})
+
+	showNotification("Event Cleared", "Event has been stopped", CONFIG.COLORS.Warning)
+
+	task.wait(0.5)
+	updateEventStatus()
+end)
+
+-- ==== STATISTICS PANEL ====
+local statsContainer = Instance.new("Frame")
+statsContainer.Size = UDim2.new(1, 0, 0, 500)
+statsContainer.BackgroundTransparency = 1
+statsContainer.Parent = statsPanel
+
+local statsListLayout = Instance.new("UIListLayout")
+statsListLayout.Padding = UDim.new(0, 15)
+statsListLayout.Parent = statsContainer
+
+local function createStatCard(title, icon, value, color)
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(1, 0, 0, 80)
+	card.BackgroundColor3 = color or CONFIG.COLORS.Primary
+	card.BackgroundTransparency = 0.2
+	card.Parent = statsContainer
+	makeCorner(card, 10)
+	makePadding(card, 15)
+
+	local iconLabel = Instance.new("TextLabel")
+	iconLabel.Size = UDim2.new(0, 50, 0, 50)
+	iconLabel.Position = UDim2.new(0, 0, 0.5, -25)
+	iconLabel.BackgroundTransparency = 1
+	iconLabel.Text = icon
+	iconLabel.Font = Enum.Font.GothamBold
+	iconLabel.TextSize = 30
+	iconLabel.Parent = card
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Size = UDim2.new(1, -60, 0, 25)
+	titleLabel.Position = UDim2.new(0, 60, 0, 10)
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Text = title
+	titleLabel.Font = Enum.Font.Gotham
+	titleLabel.TextSize = 13
+	titleLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	titleLabel.Parent = card
+
+	local valueLabel = Instance.new("TextLabel")
+	valueLabel.Size = UDim2.new(1, -60, 0, 30)
+	valueLabel.Position = UDim2.new(0, 60, 0, 35)
+	valueLabel.BackgroundTransparency = 1
+	valueLabel.Text = value
+	valueLabel.Font = Enum.Font.GothamBold
+	valueLabel.TextSize = 22
+	valueLabel.TextColor3 = Color3.new(1, 1, 1)
+	valueLabel.TextXAlignment = Enum.TextXAlignment.Left
+	valueLabel.Parent = card
+
+	return card, valueLabel
+end
+
+local onlineCard, onlineValue = createStatCard("Players Online", "👥", "Loading...", CONFIG.COLORS.Primary)
+local eventCard, eventValue = createStatCard("Active Events", "🎉", "Loading...", CONFIG.COLORS.Secondary)
+local serversCard, serversValue = createStatCard("Total Servers", "🖥️", "N/A", CONFIG.COLORS.Success)
+
+-- Refresh button
+local refreshStatsBtn = Instance.new("TextButton")
+refreshStatsBtn.Size = UDim2.new(1, 0, 0, 45)
+refreshStatsBtn.BackgroundColor3 = CONFIG.COLORS.Primary
+refreshStatsBtn.BackgroundTransparency = 0.2
+refreshStatsBtn.Text = "🔄 Refresh Statistics"
+refreshStatsBtn.Font = Enum.Font.GothamBold
+refreshStatsBtn.TextSize = 14
+refreshStatsBtn.TextColor3 = Color3.new(1, 1, 1)
+refreshStatsBtn.Parent = statsContainer
+makeCorner(refreshStatsBtn, 8)
+
+local function updateStats()
+	-- Update player count
+	local res
+	local ok = pcall(function() res = GetPlayerListRF:InvokeServer() end)
+	if ok and res and res.ok then
+		onlineValue.Text = tostring(#res.players)
+	end
+
+	-- Update event status
+	local s
+	ok = pcall(function() s = GetEventStatusRF:InvokeServer() end)
+	if ok and typeof(s) == "table" then
+		eventValue.Text = s.active and "Active" or "None"
+	end
+
+	showNotification("Statistics", "Stats refreshed", CONFIG.COLORS.Success)
+end
+
+refreshStatsBtn.MouseButton1Click:Connect(function()
+	updateStats()
+end)
+
+-- ==== LOGS PANEL ====
+local logsContainer = Instance.new("Frame")
+logsContainer.Size = UDim2.new(1, 0, 0, 450)
+logsContainer.BackgroundColor3 = CONFIG.COLORS.Dark
+logsContainer.BackgroundTransparency = 0.2
+logsContainer.Parent = logsPanel
+makeCorner(logsContainer, 8)
+
+local logsScroll = Instance.new("ScrollingFrame")
+logsScroll.Size = UDim2.new(1, -10, 1, -50)
+logsScroll.Position = UDim2.new(0, 5, 0, 5)
+logsScroll.BackgroundTransparency = 1
+logsScroll.ScrollBarThickness = 4
+logsScroll.ScrollBarImageColor3 = CONFIG.COLORS.Primary
+logsScroll.Parent = logsContainer
+
+local logsLayout = Instance.new("UIListLayout")
+logsLayout.Padding = UDim.new(0, 5)
+logsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+logsLayout.Parent = logsScroll
+
+local logIndex = 0
+
+local function addLog(message, color)
+	logIndex = logIndex + 1
+
+	local log = Instance.new("TextLabel")
+	log.Size = UDim2.new(1, -10, 0, 25)
+	log.BackgroundColor3 = color or CONFIG.COLORS.Gray
+	log.BackgroundTransparency = 0.3
+	log.Text = os.date("[%H:%M:%S] ") .. message
+	log.Font = Enum.Font.Code
+	log.TextSize = 12
+	log.TextColor3 = Color3.new(1, 1, 1)
+	log.TextXAlignment = Enum.TextXAlignment.Left
+	log.LayoutOrder = -logIndex
+	log.Parent = logsScroll
+	makeCorner(log, 4)
+	makePadding(log, 8)
+
+	logsScroll.CanvasSize = UDim2.new(0, 0, 0, logsLayout.AbsoluteContentSize.Y)
+end
+
+local clearLogsBtn = Instance.new("TextButton")
+clearLogsBtn.Size = UDim2.new(1, -10, 0, 35)
+clearLogsBtn.Position = UDim2.new(0, 5, 1, -40)
+clearLogsBtn.BackgroundColor3 = CONFIG.COLORS.Danger
+clearLogsBtn.BackgroundTransparency = 0.2
+clearLogsBtn.Text = "🗑️ Clear Logs"
+clearLogsBtn.Font = Enum.Font.GothamBold
+clearLogsBtn.TextSize = 13
+clearLogsBtn.TextColor3 = Color3.new(1, 1, 1)
+clearLogsBtn.Parent = logsContainer
+makeCorner(clearLogsBtn, 6)
+
+clearLogsBtn.MouseButton1Click:Connect(function()
+	-- Clear only TextLabels, not the layout
+	for _, child in ipairs(logsScroll:GetChildren()) do
+		if child:IsA("TextLabel") then
+			child:Destroy()
+		end
+	end
+	logIndex = 0
+	logsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	addLog("Logs cleared", CONFIG.COLORS.Warning)
+end)
+
+-- ==== Event Listeners ====
+if AdminSetStatRE then
+	AdminSetStatRE.OnClientEvent:Connect(function(data)
+		if data and data.success then
+			addLog("Stat updated: " .. tostring(data.stat) .. " = " .. tostring(data.value), CONFIG.COLORS.Success)
+		end
+	end)
+end
+
+if EventChangedRE then
+	EventChangedRE.OnClientEvent:Connect(function(data)
+		if data then
+			if data.active then
+				addLog("Event started: Summit x" .. cleanNum(data.summitMult) .. ", Cash x" .. cleanNum(data.cashMult), CONFIG.COLORS.Primary)
+			else
+				addLog("Event ended", CONFIG.COLORS.Warning)
+			end
+			updateEventStatus()
+		end
+	end)
+end
+
+-- ==== Main Controls ====
+toggleButton.MouseButton1Click:Connect(function()
+	modal.Visible = not modal.Visible
+
+	if modal.Visible then
+		tween(modal, {Size = UDim2.new(0, 900, 0, 600)}, 0.3)
+		selectTab("players")
+		refreshPlayerList()
+		updateEventStatus()
+		updateStats()
+		addLog("Admin panel opened", CONFIG.COLORS.Primary)
+	else
+		tween(modal, {Size = UDim2.new(0, 0, 0, 0)}, 0.2)
+	end
+
+	-- Rotate toggle button
+	tween(toggleButton, {Rotation = modal.Visible and 180 or 0}, 0.3)
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+	modal.Visible = false
+	tween(modal, {Size = UDim2.new(0, 0, 0, 0)}, 0.2)
+	tween(toggleButton, {Rotation = 0}, 0.3)
+end)
+
+-- Hover effects
+local function addHoverEffect(button)
+	button.MouseEnter:Connect(function()
+		tween(button, {BackgroundTransparency = 0.05}, 0.2)
+	end)
+
+	button.MouseLeave:Connect(function()
+		if button ~= tabs[currentTab].button then
+			tween(button, {BackgroundTransparency = 0.2}, 0.2)
+		end
+	end)
+end
+
+for _, tab in pairs(tabs) do
+	addHoverEffect(tab.button)
+end
+
+addHoverEffect(toggleButton)
+addHoverEffect(closeBtn)
+addHoverEffect(applyBtn)
+addHoverEffect(clearBtn)
+
+-- Auto-refresh
+task.spawn(function()
+	while true do
+		task.wait(30)
+		if modal.Visible and currentTab == "players" then
+			refreshPlayerList(searchBox.Text)
+		end
+		if modal.Visible and currentTab == "events" then
+			updateEventStatus()
+		end
+	end
+end)
+
+-- Initial log
+addLog("Admin Panel initialized successfully", CONFIG.COLORS.Success)
+addLog("Welcome, " .. LocalPlayer.Name .. "!", CONFIG.COLORS.Primary)
+
+-- Show welcome notification
+task.wait(1)
+showNotification("Welcome Admin", "Admin Panel loaded successfully", CONFIG.COLORS.Success)
+
+print("[AdminPanel] Enhanced Admin Panel loaded successfully!")

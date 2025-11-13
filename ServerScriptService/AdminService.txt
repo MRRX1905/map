@@ -1,0 +1,135 @@
+-- ServerScriptService/AdminService.server.lua script
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- ====== ADMIN IDS (ISI PUNYA KAMU) ======
+local ADMIN_IDS = {
+	567888546
+}
+
+local function isAdminUserId(userId:number): boolean
+	for _, id in ipairs(ADMIN_IDS) do
+		if id == userId then return true end
+	end
+	return false
+end
+
+-- ====== Remotes folder (AUTO-BUAT) ======
+local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+if not Remotes then
+	Remotes = Instance.new("Folder")
+	Remotes.Name = "Remotes"
+	Remotes.Parent = ReplicatedStorage
+end
+
+-- IsAdmin (RF)
+local IsAdminRF = Remotes:FindFirstChild("IsAdmin")
+if not IsAdminRF then
+	IsAdminRF = Instance.new("RemoteFunction")
+	IsAdminRF.Name = "IsAdmin"
+	IsAdminRF.Parent = Remotes
+end
+
+-- GetPlayerList (RF)
+local GetPlayerListRF = Remotes:FindFirstChild("GetPlayerList")
+if not GetPlayerListRF then
+	GetPlayerListRF = Instance.new("RemoteFunction")
+	GetPlayerListRF.Name = "GetPlayerList"
+	GetPlayerListRF.Parent = Remotes
+end
+
+-- AdminSetStat (RE)
+local AdminSetStatRE = Remotes:FindFirstChild("AdminSetStat")
+if not AdminSetStatRE then
+	AdminSetStatRE = Instance.new("RemoteEvent")
+	AdminSetStatRE.Name = "AdminSetStat"
+	AdminSetStatRE.Parent = Remotes
+end
+
+-- AdminSetEvent (RE)
+local AdminSetEventRE = Remotes:FindFirstChild("AdminSetEvent")
+if not AdminSetEventRE then
+	AdminSetEventRE = Instance.new("RemoteEvent")
+	AdminSetEventRE.Name = "AdminSetEvent"
+	AdminSetEventRE.Parent = Remotes
+end
+
+-- ====== Leaderstats helper ======
+local function getLeaderstat(player: Player, name: string)
+	local ls = player:FindFirstChild("leaderstats")
+	return (ls and ls:FindFirstChild(name)) or nil
+end
+
+-- ====== Require EventService ======
+local EventService = require(script.Parent:WaitForChild("EventService"))
+
+-- ====== Implementations ======
+IsAdminRF.OnServerInvoke = function(caller)
+	return isAdminUserId(caller.UserId)
+end
+
+GetPlayerListRF.OnServerInvoke = function(caller)
+	if not isAdminUserId(caller.UserId) then
+		return { ok=false, reason="Not authorized", players={} }
+	end
+	local list = {}
+	for _, pl in ipairs(Players:GetPlayers()) do
+		table.insert(list, { userId = pl.UserId, name = pl.Name })
+	end
+	return { ok=true, players=list }
+end
+
+AdminSetStatRE.OnServerEvent:Connect(function(caller, payload)
+	if not isAdminUserId(caller.UserId) then return end
+	if typeof(payload) ~= "table" then return end
+
+	local targetId = tonumber(payload.targetUserId)
+	local stat     = tostring(payload.stat or "")
+	local value    = tonumber(payload.value)
+
+	if not (targetId and stat and value ~= nil) then return end
+	if stat ~= "Summit" and stat ~= "Cash" then return end
+
+	-- cari player target
+	local targetPlayer
+	for _, pl in ipairs(Players:GetPlayers()) do
+		if pl.UserId == targetId then targetPlayer = pl; break end
+	end
+	if not targetPlayer then return end
+
+	-- ambil / buat leaderstat
+	local ls = targetPlayer:FindFirstChild("leaderstats")
+	if not ls then
+		ls = Instance.new("Folder")
+		ls.Name = "leaderstats"
+		ls.Parent = targetPlayer
+	end
+	local val = ls:FindFirstChild(stat)
+	if not val then
+		val = Instance.new("IntValue")
+		val.Name = stat
+		val.Value = 0
+		val.Parent = ls
+	end
+
+	-- izinkan negatif (sesuai permintaanmu)
+	val.Value = value
+end)
+
+-- payload: { startTS: number, endTS: number, summitMult: number, cashMult: number }
+AdminSetEventRE.OnServerEvent:Connect(function(caller, payload)
+	if not isAdminUserId(caller.UserId) then return end
+	if typeof(payload) ~= "table" then return end
+
+	local s  = tonumber(payload.startTS) or 0
+	local e  = tonumber(payload.endTS) or 0
+	local sm = tonumber(payload.summitMult) or 1
+	local cm = tonumber(payload.cashMult) or 1
+
+	-- normalisasi: kalau salah input → matikan event
+	if s <= 0 or e <= 0 or e <= s then
+		s, e, sm, cm = 0, 0, 1, 1
+	end
+
+	EventService.setEvent(s, e, sm, cm)
+end)

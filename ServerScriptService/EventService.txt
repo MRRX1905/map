@@ -1,0 +1,145 @@
+-- ServerScriptService/EventService module script
+
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local DataStoreService    = game:GetService("DataStoreService")
+local MessagingService    = game:GetService("MessagingService")
+
+-- Remotes (auto-create)
+local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+if not Remotes then
+	Remotes = Instance.new("Folder")
+	Remotes.Name = "Remotes"
+	Remotes.Parent = ReplicatedStorage
+end
+
+local GetEventStatusRF = Remotes:FindFirstChild("GetEventStatus") or Instance.new("RemoteFunction", Remotes)
+GetEventStatusRF.Name = "GetEventStatus"
+
+local EventChangedRE = Remotes:FindFirstChild("EventChanged") or Instance.new("RemoteEvent", Remotes)
+EventChangedRE.Name = "EventChanged"
+
+-- Replicated state (read-only)
+local EventState = ReplicatedStorage:FindFirstChild("EventState")
+if not EventState then
+	EventState = Instance.new("Folder")
+	EventState.Name = "EventState"
+	EventState.Parent = ReplicatedStorage
+end
+
+local function ensureNumber(name, default)
+	local v = EventState:FindFirstChild(name)
+	if not v then
+		v = Instance.new("NumberValue")
+		v.Name = name
+		v.Value = default
+		v.Parent = EventState
+	end
+	return v
+end
+
+local function ensureString(name, default)
+	local v = EventState:FindFirstChild(name)
+	if not v then
+		v = Instance.new("StringValue")
+		v.Name = name
+		v.Value = default
+		v.Parent = EventState
+	end
+	return v
+end
+
+local StartTS = ensureNumber("StartTS", 0)
+local EndTS   = ensureNumber("EndTS",   0)
+local SMul    = ensureNumber("SummitMultiplier", 1)
+local CMul    = ensureNumber("CashMultiplier",   1)
+local ScopeSV = ensureString("Scope", "local") -- "local" | "global"
+
+local EventStore = DataStoreService:GetDataStore("GlobalEventStore")
+
+local M = {}
+
+function M.isActive(now)
+	now = now or os.time()
+	return (StartTS.Value > 0 and EndTS.Value > 0 and now >= StartTS.Value and now <= EndTS.Value)
+end
+
+function M.getMultipliers(now)
+	if M.isActive(now) then
+		return SMul.Value, CMul.Value
+	else
+		return 1, 1
+	end
+end
+
+function M.getStatus(now)
+	now = now or os.time()
+	return {
+		active     = M.isActive(now),
+		now        = now,
+		start      = StartTS.Value,
+		["end"]    = EndTS.Value,
+		summitMult = SMul.Value,
+		cashMult   = CMul.Value,
+		scope      = ScopeSV.Value, -- << NEW
+	}
+end
+
+local function applyState(startEpoch, endEpoch, summitMult, cashMult, scope)
+	StartTS.Value = math.floor(tonumber(startEpoch) or 0)
+	EndTS.Value   = math.floor(tonumber(endEpoch)   or 0)
+	SMul.Value    = tonumber(summitMult) or 1
+	CMul.Value    = tonumber(cashMult)   or 1
+	ScopeSV.Value = scope or "local"
+	EventChangedRE:FireAllClients(M.getStatus())
+end
+
+-- Local only
+function M.setLocal(startEpoch, endEpoch, summitMult, cashMult)
+	applyState(startEpoch, endEpoch, summitMult, cashMult, "local")
+end
+
+-- Global (persist + broadcast)
+function M.setGlobal(startEpoch, endEpoch, summitMult, cashMult)
+	applyState(startEpoch, endEpoch, summitMult, cashMult, "global")
+	local payload = {
+		startTS = StartTS.Value,
+		endTS   = EndTS.Value,
+		summitMult = SMul.Value,
+		cashMult   = CMul.Value,
+		scope      = "global",
+	}
+	pcall(function() EventStore:SetAsync("CurrentEvent", payload) end)
+	pcall(function() MessagingService:PublishAsync("GlobalEventUpdate", payload) end)
+end
+
+-- Back-compat
+function M.setEvent(startEpoch, endEpoch, summitMult, cashMult)
+	M.setLocal(startEpoch, endEpoch, summitMult, cashMult)
+end
+
+-- Subscribe global updates
+task.spawn(function()
+	pcall(function()
+		MessagingService:SubscribeAsync("GlobalEventUpdate", function(msg)
+			local d = msg.Data
+			if typeof(d) == "table" then
+				applyState(d.startTS, d.endTS, d.summitMult, d.cashMult, "global")
+			end
+		end)
+	end)
+end)
+
+-- Cold start: load saved global
+task.defer(function()
+	local saved
+	pcall(function() saved = EventStore:GetAsync("CurrentEvent") end)
+	if typeof(saved) == "table" then
+		applyState(saved.startTS, saved.endTS, saved.summitMult, saved.cashMult, "global")
+	end
+end)
+
+GetEventStatusRF.OnServerInvoke = function()
+	return M.getStatus()
+end
+
+return M

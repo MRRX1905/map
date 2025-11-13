@@ -1,0 +1,40 @@
+-- ProgressStore.server.lua module script
+
+local DataStoreService = game:GetService("DataStoreService")
+local STORE_NAME = "MountainClimb_v8"
+
+local store
+do
+	local ok, ds = pcall(function() return DataStoreService:GetDataStore(STORE_NAME) end)
+	if ok then store = ds else warn("[ProgressStore] GetDataStore gagal") end
+end
+
+local M = {}
+
+function M.load(userId)
+	if not store then return nil end
+	local ok, result = pcall(function()
+		return store:GetAsync(tostring(userId))
+	end)
+	if not ok then
+		warn("[ProgressStore] Load failed:", result)
+		return nil
+	end
+	return result
+end
+
+function M.save(userId, data)
+	if not store then return false end
+	local payload = {
+		checkpoint = tonumber(data and data.checkpoint) or 0,
+		summit     = math.max(0, tonumber(data and data.summit) or 0),
+		cash       = math.max(0, tonumber(data and data.cash) or 0),
+	}
+	local ok, err = pcall(function()
+		store:SetAsync(tostring(userId), payload)
+	end)
+	if not ok then warn("[ProgressStore] Save failed:", err) end
+	return ok
+end
+
+return M

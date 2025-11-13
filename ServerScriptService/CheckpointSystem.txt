@@ -1,0 +1,441 @@
+-- CheckpointSystem.server.lua script
+local EventService = require(script.Parent:WaitForChild("EventService"))
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+
+local CHECKPOINTS = workspace:WaitForChild("Checkpoints")
+local SPAWNS = workspace:WaitForChild("Spawns")
+
+local RETURN_TO_BASE = workspace:FindFirstChild("ReturnToBase")
+	or CHECKPOINTS:FindFirstChild("ReturnToBase")
+
+
+
+-- KONFIG
+local SPAWN_Y_OFFSET = 4
+local CASH_REWARD_ON_SUMMIT = 500
+local SUMMIT_INCREMENT = 1
+
+-- UI (opsional)
+local UIEvents = ReplicatedStorage:FindFirstChild("UIEvents")
+local ToastEvent = UIEvents and UIEvents:FindFirstChild("Toast")
+local function toast(player, payload)
+	if ToastEvent then pcall(function() ToastEvent:FireClient(player, payload) end) end
+end
+
+--------------------------------------------------------------------------------
+-- DYNAMIC CHECKPOINT DISCOVERY
+--------------------------------------------------------------------------------
+local CPList = {}          -- [n] = BasePart (CPn)
+local CPIndexByName = {}   -- "CPn" -> n
+local SummitPart = nil
+
+local function getCPNumberFromName(name)
+	local idx = string.match(name, "^CP(%d+)$")
+	return idx and tonumber(idx) or nil
+end
+
+local function rebuildCPMap()
+	CPList = {}
+	CPIndexByName = {}
+	SummitPart = nil
+
+	for _, child in ipairs(CHECKPOINTS:GetChildren()) do
+		if child:IsA("BasePart") then
+			if child.Name == "Summit" then
+				SummitPart = child
+			else
+				local n = getCPNumberFromName(child.Name)
+				if n then
+					CPList[n] = child
+					CPIndexByName["CP"..n] = n
+				end
+			end
+		end
+	end
+end
+rebuildCPMap()
+
+local function getTotalCP()
+	local m = 0
+	for n in pairs(CPList) do
+		if n > m then m = n end
+	end
+	return m
+end
+
+local function getSummitIndex()
+	local total = getTotalCP()
+	return SummitPart and (total + 1) or nil
+end
+
+--------------------------------------------------------------------------------
+-- HIDDEN GATES (wajib disentuh)
+--------------------------------------------------------------------------------
+local HIDDENGATES = workspace:FindFirstChild("HiddenGates")
+local GatesByTarget = {}   -- ["CP2"]={part1,...}, ["Summit"]={...}
+
+local function rebuildGatesMap()
+	GatesByTarget = {}
+	if not HIDDENGATES then return end
+	for _, g in ipairs(HIDDENGATES:GetChildren()) do
+		if g:IsA("BasePart") then
+			local target = g:GetAttribute("Before") -- "CP2"/"Summit"/dst
+			if typeof(target) == "string" and #target > 0 then
+				GatesByTarget[target] = GatesByTarget[target] or {}
+				table.insert(GatesByTarget[target], g)
+			end
+		end
+	end
+end
+rebuildGatesMap()
+
+local function ensureGateFlagsFolder(player)
+	local prog = player:FindFirstChild("Progress")
+	if not prog then
+		prog = Instance.new("Folder"); prog.Name = "Progress"; prog.Parent = player
+	end
+	local gates = prog:FindFirstChild("Gates")
+	if not gates then
+		gates = Instance.new("Folder"); gates.Name = "Gates"; gates.Parent = prog
+	end
+	return gates
+end
+
+local function clearGateFlags(player)
+	local gates = ensureGateFlagsFolder(player)
+	for _, child in ipairs(gates:GetChildren()) do
+		if child:IsA("BoolValue") then
+			child:Destroy()
+		end
+	end
+end
+
+
+local function markGateTouched(player, gateName)
+	local gates = ensureGateFlagsFolder(player)
+	local flag = gates:FindFirstChild(gateName)
+	if not flag then
+		flag = Instance.new("BoolValue"); flag.Name = gateName; flag.Parent = gates
+	end
+	flag.Value = true
+end
+
+local function hasTouchedGate(player, gateName)
+	local gates = ensureGateFlagsFolder(player)
+	local flag = gates:FindFirstChild(gateName)
+	return flag and flag.Value == true
+end
+
+local function validateGatesOrKick(player, targetLabel)
+	local gates = GatesByTarget[targetLabel]
+	if not gates or #gates == 0 then
+		return true
+	end
+	for _, g in ipairs(gates) do
+		if g:IsA("BasePart") then
+			if not hasTouchedGate(player, g.Name) then
+				local reason = g:GetAttribute("Reason")
+				local msg = (typeof(reason) == "string" and #reason > 0) and reason or "lu teleport ya?"
+				pcall(function() toast(player, { text = msg, kind = "warn", duration = 2 }) end)
+				player:Kick(msg)
+				return false
+			end
+		end
+	end
+	return true
+end
+
+local function bindGateTouch(gatePart)
+	if not (gatePart and gatePart:IsA("BasePart")) then return end
+	gatePart.Touched:Connect(function(hit)
+		local character = hit and hit:FindFirstAncestorOfClass("Model")
+		local player = character and Players:GetPlayerFromCharacter(character)
+		if not player then return end
+		markGateTouched(player, gatePart.Name)
+	end)
+end
+
+if HIDDENGATES then
+	for _, g in ipairs(HIDDENGATES:GetChildren()) do
+		if g:IsA("BasePart") then bindGateTouch(g) end
+	end
+	HIDDENGATES.ChildAdded:Connect(function(child)
+		task.wait()
+		rebuildGatesMap()
+		if child:IsA("BasePart") then task.defer(function() bindGateTouch(child) end) end
+	end)
+end
+
+--------------------------------------------------------------------------------
+-- PROGRESS & LEADERSTATS
+--------------------------------------------------------------------------------
+-- Progress.Checkpoint (IntValue): 0=Base, 1..TOTAL_CP, SUMMIT_IDX=Summit
+-- leaderstats:
+--   Checkpoint (StringValue) : "Base" | "CPn" | "Summit"
+--   Summit (IntValue)
+--   Cash   (IntValue)
+
+local function labelForCheckpoint(idx)
+	if not idx or idx <= 0 then return "Base" end
+	local summitIdx = getSummitIndex()
+	if summitIdx and idx == summitIdx then return "Summit" end
+	return ("CP%d"):format(idx)
+end
+
+local function ensureContainers(player)
+	-- Progress
+	local prog = player:FindFirstChild("Progress")
+	if not prog then
+		prog = Instance.new("Folder"); prog.Name = "Progress"; prog.Parent = player
+	end
+	local cpIdxVal = prog:FindFirstChild("Checkpoint")
+	if not cpIdxVal then
+		cpIdxVal = Instance.new("IntValue"); cpIdxVal.Name = "Checkpoint"; cpIdxVal.Value = 0; cpIdxVal.Parent = prog
+	end
+
+	-- leaderstats
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if not leaderstats then
+		leaderstats = Instance.new("Folder"); leaderstats.Name = "leaderstats"; leaderstats.Parent = player
+	end
+
+	local lsCheckpoint = leaderstats:FindFirstChild("Checkpoint")
+	if not lsCheckpoint then
+		lsCheckpoint = Instance.new("StringValue"); lsCheckpoint.Name = "Checkpoint"; lsCheckpoint.Parent = leaderstats
+		lsCheckpoint.Value = labelForCheckpoint(cpIdxVal.Value)
+	end
+
+	local summitVal = leaderstats:FindFirstChild("Summit")
+	if not summitVal then
+		summitVal = Instance.new("IntValue"); summitVal.Name = "Summit"; summitVal.Value = 0; summitVal.Parent = leaderstats
+	end
+
+	local cashVal = leaderstats:FindFirstChild("Cash")
+	if not cashVal then
+		cashVal = Instance.new("IntValue"); cashVal.Name = "Cash"; cashVal.Value = 0; cashVal.Parent = leaderstats
+	end
+
+	cpIdxVal:GetPropertyChangedSignal("Value"):Connect(function()
+		lsCheckpoint.Value = labelForCheckpoint(cpIdxVal.Value)
+	end)
+
+	return cpIdxVal, summitVal, cashVal
+end
+
+--------------------------------------------------------------------------------
+-- TELEPORT & UTILS
+--------------------------------------------------------------------------------
+local function findSpawnPartByNames(names)
+	for _, child in ipairs(SPAWNS:GetChildren()) do
+		if child:IsA("BasePart") then
+			local lname = string.lower(child.Name)
+			for _, want in ipairs(names) do
+				if lname == string.lower(want) then
+					return child
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function getSpawnCFrame(checkpointIndex)
+	if checkpointIndex <= 0 then
+		return SPAWNS.BaseSpawn.CFrame
+	end
+	local summitIdx = getSummitIndex()
+	if summitIdx and checkpointIndex == summitIdx then
+		local s = findSpawnPartByNames({ "Spawn_Summit", "Spawn_summit" })
+		return (s and s.CFrame) or SPAWNS.BaseSpawn.CFrame
+	end
+	local spawn = SPAWNS:FindFirstChild("Spawn_CP"..checkpointIndex)
+		or findSpawnPartByNames({ "spawn_cp"..checkpointIndex })
+	return (spawn and spawn.CFrame) or SPAWNS.BaseSpawn.CFrame
+end
+
+local function teleportToIndex(character, idx)
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	hrp.CFrame = getSpawnCFrame(idx) + Vector3.new(0, SPAWN_Y_OFFSET, 0)
+end
+
+local touchDebounce = setmetatable({}, { __mode = "k" })
+local function canTouch(player, window)
+	window = window or 0.75
+	local t = tick()
+	if not touchDebounce[player] or (t - touchDebounce[player]) >= window then
+		touchDebounce[player] = t
+		return true
+	end
+	return false
+end
+
+--------------------------------------------------------------------------------
+-- BINDERS: CP & SUMMIT & RETURN_TO_BASE
+--------------------------------------------------------------------------------
+local function bindCP(part, cpNumber)
+	part.Touched:Connect(function(hit)
+		local character = hit and hit:FindFirstAncestorOfClass("Model")
+		local player = character and Players:GetPlayerFromCharacter(character)
+		if not player or not canTouch(player) then return end
+
+		local cpIdxVal, summitVal, cashVal = ensureContainers(player)
+		local current = cpIdxVal.Value
+
+		-- valid hanya jika cpNumber == current + 1
+		if cpNumber == current + 1 then
+			-- HiddenGates check before CPn
+			local targetLabel = ("CP%d"):format(cpNumber)
+			if not validateGatesOrKick(player, targetLabel) then return end
+
+			cpIdxVal.Value = cpNumber
+			toast(player, { text = ("Checkpoint %d tercapai!"):format(cpNumber), kind = "success", duration = 2 })
+			return
+		end
+
+		-- skip -> teleport balik
+		if cpNumber > current + 1 then
+			teleportToIndex(character, current)
+			toast(player, { text = "Kamu melewati checkpoint sebelumnya.", kind = "warn", duration = 2.2 })
+		end
+		-- kalau sentuh CP lama atau sama, abaikan
+	end)
+end
+
+local function bindSummit(part)
+	part.Touched:Connect(function(hit)
+		local character = hit and hit:FindFirstAncestorOfClass("Model")
+		local player = character and Players:GetPlayerFromCharacter(character)
+		
+		if not player or not canTouch(player) then return end
+
+		local cpIdxVal, summitVal, cashVal = ensureContainers(player)
+		local current = cpIdxVal.Value
+		local total = getTotalCP()
+		local summitIdx = getSummitIndex()
+		if not summitIdx then
+			toast(player, { text = "Summit belum dikonfigurasi.", kind = "warn" })
+			return
+		end
+
+		if current == total then
+			-- HiddenGates check before Summit
+			if not validateGatesOrKick(player, "Summit") then return end
+			
+			-- Pakai multiplier event dari EventService
+			local sMul, cMul = EventService.getMultipliers()
+			local summitGain = math.floor(SUMMIT_INCREMENT * sMul)
+			local cashGain   = math.floor(CASH_REWARD_ON_SUMMIT * cMul)
+			cpIdxVal.Value   = summitIdx
+			summitVal.Value  = (summitVal.Value or 0) + summitGain
+			cashVal.Value    = (cashVal.Value or 0) + cashGain
+			-- sudah hitung sMul, cMul, summitGain, cashGain di atas
+			toast(player, {
+				text = string.format(
+					"Summit Tercapai! +%d Summit, +%d Cash",
+					summitGain,
+					cashGain
+				),
+				kind = "success",
+				duration = 3
+			})
+
+		else
+			--teleportToIndex(character, current)
+			toast(player, { text = "Selesaikan semua checkpoint dulu.", kind = "warn", duration = 2.2 })
+		end
+	end)
+end
+
+-- Bind semua CP dan Summit
+for n, part in pairs(CPList) do
+	bindCP(part, n)
+end
+if SummitPart then
+	bindSummit(SummitPart)
+end
+
+-- Rebind jika menambah CP/Summit saat runtime
+CHECKPOINTS.ChildAdded:Connect(function(child)
+	task.wait()
+	if child:IsA("BasePart") then
+		local wasSummit = (child.Name == "Summit")
+		local n = getCPNumberFromName(child.Name)
+		if wasSummit or n then
+			rebuildCPMap()
+			if wasSummit then bindSummit(child) end
+			if n then bindCP(child, n) end
+		end
+	end
+end)
+
+-- ReturnToBase
+if RETURN_TO_BASE and RETURN_TO_BASE:IsA("BasePart") then
+	RETURN_TO_BASE.Touched:Connect(function(hit)
+		local character = hit and hit:FindFirstAncestorOfClass("Model")
+		local player = character and Players:GetPlayerFromCharacter(character)
+		if not player or not canTouch(player) then return end
+
+		local cpIdxVal = ensureContainers(player)
+		cpIdxVal.Value = 0                -- balik ke Base
+		clearGateFlags(player)            -- ⟵ reset semua gate yang pernah disentuh
+		teleportToIndex(character, 0)
+		toast(player, { text = "Kembali ke Base Camp.", kind = "info", duration = 2 })
+	end)
+end
+
+
+--------------------------------------------------------------------------------
+-- RESPAWN & DATASTORE
+--------------------------------------------------------------------------------
+Players.PlayerAdded:Connect(function(player)
+	local cpIdxVal, summitVal, cashVal = ensureContainers(player)
+
+	-- Load
+	local Store = require(script.Parent:WaitForChild("ProgressStore"))
+	local saved = Store.load(player.UserId)
+	if typeof(saved) == "table" then
+		rebuildCPMap()
+		local summitIdx = getSummitIndex() or (getTotalCP() + 1)
+		local idx = tonumber(saved.checkpoint) or 0
+		if idx < 0 then idx = 0 end
+		if idx > summitIdx then idx = summitIdx end
+		cpIdxVal.Value = idx
+		summitVal.Value = math.max(0, tonumber(saved.summit) or 0)
+		cashVal.Value   = math.max(0, tonumber(saved.cash) or 0)
+	end
+
+	player.CharacterAdded:Connect(function(char)
+		task.defer(function()
+			teleportToIndex(char, cpIdxVal.Value)
+		end)
+	end)
+
+	local function saveNow()
+		Store.save(player.UserId, {
+			checkpoint = cpIdxVal.Value,
+			summit     = summitVal.Value,
+			cash       = cashVal.Value,
+		})
+	end
+	cpIdxVal:GetPropertyChangedSignal("Value"):Connect(saveNow)
+	summitVal:GetPropertyChangedSignal("Value"):Connect(saveNow)
+	cashVal:GetPropertyChangedSignal("Value"):Connect(saveNow)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	local prog = player:FindFirstChild("Progress")
+	local ls   = player:FindFirstChild("leaderstats")
+	local cpIdxVal = prog and prog:FindFirstChild("Checkpoint")
+	local summitVal = ls and ls:FindFirstChild("Summit")
+	local cashVal   = ls and ls:FindFirstChild("Cash")
+	local Store = require(script.Parent:WaitForChild("ProgressStore"))
+	Store.save(player.UserId, {
+		checkpoint = cpIdxVal and cpIdxVal.Value or 0,
+		summit     = summitVal and summitVal.Value or 0,
+		cash       = cashVal and cashVal.Value or 0,
+	})
+end)
